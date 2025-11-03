@@ -1,0 +1,8 @@
+{
+  "name": "Guyanese Language Assistant",
+  "description": "An interactive assistant to learn about Guyanese tribal languages and have real-time audio conversations, powered by Google Gemini API.",
+  "requestFramePermissions": [
+    "microphone",
+    "geolocation"
+  ]
+}
