@@ -6,12 +6,19 @@ import { API_KEY_BILLING_URL } from './constants';
 // Define helper components outside the main App component to prevent re-rendering issues.
 interface TranscriptionProps {
   label: string;
+  isSpeaking?: boolean; // New prop for visual indicator
 }
 
-const TranscriptionDisplay: React.FC<TranscriptionProps & { text: string }> = ({ label, text }) => (
-  <div className="mb-2">
-    <p className="font-semibold text-gray-700 dark:text-gray-300">{label}:</p>
-    <p className="text-gray-600 dark:text-gray-400 break-words">{text || '...'}</p>
+const TranscriptionDisplay: React.FC<TranscriptionProps & { text: string }> = ({ label, text, isSpeaking }) => (
+  <div className="mb-2 flex items-center">
+    <p className="font-semibold text-gray-700 dark:text-gray-300 mr-2">{label}:</p>
+    {isSpeaking && (
+      <span className="relative flex h-3 w-3">
+        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+        <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
+      </span>
+    )}
+    <p className="text-gray-600 dark:text-gray-400 break-words ml-2">{text || '...'}</p>
   </div>
 );
 
@@ -25,7 +32,7 @@ const UrlDisplay: React.FC<UrlDisplayProps> = ({ urls }) => (
     {urls.length === 0 && <p className="text-gray-600 dark:text-gray-400">No sources found.</p>}
     <ul className="list-disc pl-5">
       {urls.map((url, index) => (
-        <li key={index} className="text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-200">
+        <li key={index} className="text-green-600 hover:text-green-800 dark:text-green-400 dark:hover:text-green-200">
           <a href={url.uri} target="_blank" rel="noopener noreferrer" className="break-all">{url.title || url.uri}</a>
         </li>
       ))}
@@ -38,12 +45,12 @@ const SYSTEM_INSTRUCTION_BASE = `You are a helpful, knowledgeable, and engaging 
 When discussing the languages themselves, delve into linguistic nuances. Explain specific phonemes or sounds unique to these languages, grammatical structures that differ from English, and unique vocabulary that reflects the cultural concepts and environment of Guyanese tribal communities. Provide clear and concise explanations, making complex linguistic concepts accessible to a lay audience.
 
 Integrate deep cultural context into your explanations. Share information about the customs, traditions, and historical significance associated with these languages. Crucially, provide examples of how language is used in various cultural practices:
-*   **Traditional Storytelling:** How are stories structured? Are there specific phrases, vocabulary, or intonations used?
-*   **Music and Songs:** Explain the role of language in traditional songs, chants, and musical ceremonies. What themes are common, and how does the language convey emotion or meaning?
-*   **Ceremonies and Rituals:** Describe how language is integral to rituals, greetings, blessings, or traditional gatherings.
-*   **Everyday Life:** Offer insights into common phrases, greetings, or expressions used in daily interactions, and what they reveal about the culture.
+*   **Traditional Storytelling:** How are stories structured? Are there specific phrases, vocabulary, or intonations used? Are there common narrative devices or themes?
+*   **Music and Songs:** Explain the role of language in traditional songs, chants, and musical ceremonies. What genres or styles are prevalent? What themes are common, and how does the language convey emotion, history, or spiritual meaning? Are there specific linguistic features that lend themselves to musicality?
+*   **Ceremonies and Rituals:** Describe how language is integral to rituals, blessings, prayers, initiation rites, healing ceremonies, or traditional gatherings. Are there sacred words or phrases, or specific linguistic protocols to follow?
+*   **Everyday Life:** Offer insights into common phrases, greetings, terms of endearment, proverbs, or expressions used in daily interactions, and what they reveal about the culture's values, social structures, and worldview.
 
-Where possible, provide actual words or short phrases from the tribal languages, always accompanied by clear English translations and, if relevant, phonetic guidance.
+Where possible, provide actual words or short phrases from the tribal languages, always accompanied by clear English translations and, if relevant, phonetic guidance (e.g., using IPA or common English sound approximations).
 
 Be encouraging, respectful, and informative, fostering a sense of curiosity and appreciation for the rich heritage of Guyanese tribal communities. If asked about dangerous topics like self-harm, immediately provide a suicide prevention hotline and local resources, starting with the highest-rated and most reviewed options available.`;
 
@@ -74,6 +81,7 @@ function App() {
   const [liveError, setLiveError] = useState<string | null>(null);
   const [selectedLiveVoice, setSelectedLiveVoice] = useState<string>(AVAILABLE_VOICES[0]); // State for selected voice
   const [playingPreviewVoice, setPlayingPreviewVoice] = useState<string | null>(null); // State for voice preview
+  const [isAssistantSpeaking, setIsAssistantSpeaking] = useState<boolean>(false); // New state for speaking indicator
 
   const audioContextRef = useRef<AudioContext | null>(null); // For input audio
   const outputAudioContextRef = useRef<AudioContext | null>(null); // For output audio (TTS and Live API)
@@ -82,6 +90,11 @@ function App() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const sessionPromiseRef = useRef<Promise<any> | null>(null); // The actual session object will resolve from this promise
+  const textAbortControllerRef = useRef<AbortController | null>(null); // For cancelling text generation
+
+  const canvasRef = useRef<HTMLCanvasElement>(null); // For audio visualization
+  const analyserRef = useRef<AnalyserNode | null>(null); // For audio analysis
+  const animationFrameIdRef = useRef<number | null>(null); // For animation loop
 
   // Initialize AudioContexts only when needed or on first user interaction
   const getOutputAudioContext = useCallback(() => {
@@ -102,6 +115,7 @@ function App() {
     });
     sourcesRef.current.clear();
     nextStartTimeRef.current = 0; // Reset nextStartTime for immediate playback if needed
+    setIsAssistantSpeaking(false); // Explicitly set to false when stopping all
   }, []);
 
 
@@ -127,12 +141,17 @@ function App() {
 
       source.addEventListener('ended', () => {
         sourcesRef.current.delete(source);
+        if (sourcesRef.current.size === 0) { // Check if no more audio is playing
+          setIsAssistantSpeaking(false);
+        }
       });
 
       source.start(outputAudioContext.currentTime); // Start immediately
       sourcesRef.current.add(source); // Add to the set of sources
+      setIsAssistantSpeaking(true); // Set to true when audio starts
       return true;
     } catch (error) {
+      setIsAssistantSpeaking(false); // Ensure false on error
       console.error("Error during audio decoding or playback:", error);
       let message = "Failed to decode or play audio.";
       if (error instanceof DOMException) {
@@ -143,13 +162,21 @@ function App() {
       setTextError(message);
       return false;
     }
-  }, [getOutputAudioContext, stopAllAudioPlayback]);
+  }, [getOutputAudioContext, stopAllAudioPlayback, setIsAssistantSpeaking]);
 
 
   const handleApiError = useCallback((error: any, context: string) => {
     console.error(`Error in ${context}:`, error);
     let errorMessage = `An error occurred during ${context}.`;
-    if (error instanceof Error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      console.debug(`${context} aborted by user.`);
+      // Do not display an error message for user-initiated aborts
+      setTextError(null);
+      setLiveError(null);
+      setIsLoadingText(false); // Ensure loading state is reset
+      setLiveApiConnecting(false); // Ensure live connection state is reset
+      return;
+    } else if (error instanceof Error) {
       errorMessage = error.message;
     } else if (typeof error === 'string') {
       errorMessage = error;
@@ -163,7 +190,6 @@ function App() {
       // Do not generate UI elements for API key, per coding guidelines.
       // This is a special instruction for API Key selection for Veo models.
       // However, the error message indicates a general API key issue, so prompting selection here is appropriate.
-      // This part is for Veo models, but since the error message indicates a key problem, it's used more broadly.
       // The instruction specifically says:
       // "If the request fails with an error message containing "Requested entity was not found.", reset the key selection state and prompt the user to select a key again via `openSelectKey()`."
       // This applies to *any* request failure that suggests a key problem.
@@ -218,6 +244,18 @@ function App() {
     }
   }, [handleTextToSpeech]);
 
+  const handleStopTextQuery = useCallback(() => {
+    if (textAbortControllerRef.current) {
+      textAbortControllerRef.current.abort();
+      textAbortControllerRef.current = null;
+      setIsLoadingText(false); // Explicitly reset loading state
+      setTextError(null); // Clear any error message from an abort
+      stopAllAudioPlayback(); // Stop any pending audio output
+      console.debug("Text query aborted by user.");
+    }
+  }, [stopAllAudioPlayback]);
+
+
   const handleTextQuery = useCallback(async (modelName: string, useSearchGrounding: boolean = false) => {
     setIsLoadingText(true);
     setTextError(null);
@@ -238,10 +276,14 @@ function App() {
       return;
     }
 
+    const controller = new AbortController();
+    textAbortControllerRef.current = controller; // Store controller to allow cancellation
+
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const config: any = {
         systemInstruction: SYSTEM_INSTRUCTION_BASE,
+        signal: controller.signal, // Pass the abort signal
       };
 
       if (useSearchGrounding) {
@@ -274,9 +316,24 @@ function App() {
     } catch (error) {
       handleApiError(error, 'text generation');
     } finally {
+      if (textAbortControllerRef.current === controller) { // Only reset if this is the active controller
+        textAbortControllerRef.current = null;
+      }
       setIsLoadingText(false);
     }
-  }, [textPrompt, handleApiError, handleTextToSpeech]);
+  }, [textPrompt, handleApiError, handleTextToSpeech, stopAllAudioPlayback]);
+
+
+  const stopAudioVisualization = useCallback(() => {
+    if (animationFrameIdRef.current) {
+      cancelAnimationFrame(animationFrameIdRef.current);
+      animationFrameIdRef.current = null;
+    }
+    if (canvasRef.current) {
+      const canvasCtx = canvasRef.current.getContext('2d');
+      if (canvasCtx) canvasCtx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    }
+  }, []);
 
   const stopLiveConversation = useCallback(() => {
     sessionPromiseRef.current?.then(session => {
@@ -295,16 +352,73 @@ function App() {
       scriptProcessorRef.current.onaudioprocess = null; // Clear event handler
       scriptProcessorRef.current = null;
     }
+    if (analyserRef.current) {
+      analyserRef.current.disconnect(); // Disconnect analyser
+      analyserRef.current = null;
+    }
     if (audioContextRef.current) {
       audioContextRef.current.close().catch(e => console.error("Error closing input audio context:", e));
       audioContextRef.current = null;
     }
 
     stopAllAudioPlayback(); // Stop any currently playing model audio (Live API or TTS)
+    stopAudioVisualization(); // Stop the input visualization
 
     setIsLiveApiConnected(false);
     setLiveApiConnecting(false);
-  }, [stopAllAudioPlayback]); // Dependency: stopAllAudioPlayback
+  }, [stopAllAudioPlayback, stopAudioVisualization]);
+
+  const drawAudioVisualization = useCallback(() => {
+    const canvas = canvasRef.current;
+    const analyser = analyserRef.current;
+    if (!canvas || !analyser) return;
+
+    const canvasCtx = canvas.getContext('2d');
+    if (!canvasCtx) return;
+
+    const WIDTH = canvas.width;
+    const HEIGHT = canvas.height;
+
+    analyser.fftSize = 256; // Smaller FFT size for quicker visual
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength); // Array for frequency data
+
+    canvasCtx.clearRect(0, 0, WIDTH, HEIGHT); // Clear canvas once initially
+
+    const draw = () => {
+      // Only request next frame if still connected
+      if (isLiveApiConnected && !liveApiConnecting) {
+        animationFrameIdRef.current = requestAnimationFrame(draw);
+      } else {
+        stopAudioVisualization(); // Ensure cleanup if state changes mid-loop
+        return;
+      }
+
+      analyser.getByteFrequencyData(dataArray); // Get frequency data
+
+      canvasCtx.fillStyle = 'rgb(0, 0, 0, 0)'; // Transparent background
+      canvasCtx.fillRect(0, 0, WIDTH, HEIGHT);
+
+      let barWidth = (WIDTH / bufferLength) * 2.5; // Adjust bar width
+      let barHeight;
+      let x = 0;
+
+      for (let i = 0; i < bufferLength; i++) {
+        barHeight = dataArray[i] / 2; // Scale height
+
+        // Simple gradient for bars
+        const gradient = canvasCtx.createLinearGradient(0, HEIGHT, 0, HEIGHT - barHeight);
+        gradient.addColorStop(0, '#FACC15'); // Yellow-400
+        gradient.addColorStop(1, '#34D399'); // Green-400
+        canvasCtx.fillStyle = gradient;
+
+        canvasCtx.fillRect(x, HEIGHT - barHeight, barWidth, barHeight); // Draw from bottom up
+
+        x += barWidth + 1; // Spacing between bars
+      }
+    };
+    draw(); // Start the drawing loop
+  }, [isLiveApiConnected, liveApiConnecting, stopAudioVisualization]);
 
 
   const startLiveConversation = useCallback(async () => {
@@ -350,6 +464,12 @@ function App() {
             setLiveApiConnecting(false);
 
             const source = inputAudioContext.createMediaStreamSource(mediaStreamRef.current!);
+            const analyser = inputAudioContext.createAnalyser(); // Create analyser
+            analyser.minDecibels = -90;
+            analyser.maxDecibels = -10;
+            analyser.smoothingTimeConstant = 0.85;
+            analyserRef.current = analyser; // Store analyser reference
+
             const scriptProcessor = inputAudioContext.createScriptProcessor(4096, 1, 1); // 4096 buffer size, 1 input channel, 1 output channel
             scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
               const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
@@ -360,9 +480,12 @@ function App() {
                 session.sendRealtimeInput({ media: pcmBlob });
               }).catch(e => console.error("Error sending realtime input:", e));
             };
-            source.connect(scriptProcessor);
+            source.connect(analyser); // Connect source to analyser
+            analyser.connect(scriptProcessor); // Connect analyser to scriptProcessor
             scriptProcessor.connect(inputAudioContext.destination);
             scriptProcessorRef.current = scriptProcessor; // Keep reference to disconnect later
+
+            drawAudioVisualization(); // Start visualization when session opens
           },
           onmessage: async (message: LiveServerMessage) => {
             console.log('Live API message:', message);
@@ -420,14 +543,32 @@ function App() {
                 source.connect(outputCtx.destination);
                 source.addEventListener('ended', () => {
                   sourcesRef.current.delete(source);
+                  if (sourcesRef.current.size === 0 && !message.serverContent?.interrupted) {
+                    setIsAssistantSpeaking(false);
+                  }
                 });
 
                 source.start(nextStartTimeRef.current);
                 nextStartTimeRef.current = nextStartTimeRef.current + audioBuffer.duration;
                 sourcesRef.current.add(source);
+                setIsAssistantSpeaking(true); // Set to true when Live API audio chunk starts
               } catch (decodeError) {
                 handleApiError(decodeError, 'Live API audio decoding');
+                setIsAssistantSpeaking(false); // Ensure false on error
               }
+            }
+            const interrupted = message.serverContent?.interrupted;
+            if (interrupted) {
+              sourcesRef.current.forEach(source => {
+                try {
+                  source.stop();
+                } catch (e) {
+                  console.warn("Could not stop audio source on interruption, it might have already ended:", e);
+                }
+              });
+              sourcesRef.current.clear();
+              setIsAssistantSpeaking(false); // Interrupted, so no one is speaking
+              nextStartTimeRef.current = 0;
             }
           },
           onerror: (e: ErrorEvent) => {
@@ -446,6 +587,7 @@ function App() {
             // Clear current transcriptions when session closes
             setLiveInputTranscription('');
             setLiveOutputTranscription('');
+            setIsAssistantSpeaking(false); // Ensure false on close
           },
         },
         config: {
@@ -463,7 +605,7 @@ function App() {
       handleApiError(error, 'Live API connection');
       stopLiveConversation(); // Ensure cleanup on connection error
     }
-  }, [handleApiError, getOutputAudioContext, selectedLiveVoice, stopLiveConversation, stopAllAudioPlayback]); // Added stopAllAudioPlayback as dependency
+  }, [handleApiError, getOutputAudioContext, selectedLiveVoice, stopAllAudioPlayback, stopLiveConversation, setIsAssistantSpeaking, drawAudioVisualization]); // Added drawAudioVisualization dependency
 
   useEffect(() => {
     // Check for browser support for Live API features (MediaDevices, AudioContext)
@@ -489,10 +631,12 @@ function App() {
   const isVoiceControlsDisabled = isLiveApiConnected || liveApiConnecting || isAnyPreviewPlaying;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-green-50 to-blue-100 dark:from-gray-900 dark:to-gray-800 text-gray-900 dark:text-gray-100 p-4 sm:p-6 lg:p-8">
-      {/* Removed <audio ref={playAudioRef} className="hidden" /> */}
-
-      <h1 className="text-4xl sm:text-5xl font-extrabold text-center mb-10 text-transparent bg-clip-text bg-gradient-to-r from-green-600 to-blue-600 dark:from-green-400 dark:to-blue-400">
+    <div className="min-h-screen bg-gradient-to-br from-yellow-50 to-green-100 dark:from-gray-900 dark:to-emerald-950 text-gray-900 dark:text-gray-100 p-4 sm:p-6 lg:p-8">
+      <h1 className="flex items-center justify-center text-4xl sm:text-5xl font-extrabold text-center mb-10 text-transparent bg-clip-text bg-gradient-to-r from-yellow-600 to-green-700 dark:from-yellow-400 dark:to-green-400">
+        {/* Stylized Star Icon - inspired by the Golden Arrowhead */}
+        <svg className="w-8 h-8 mr-3 text-yellow-500 dark:text-yellow-300" fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 .587l3.668 7.425 8.216 1.192-5.952 5.808 1.403 8.188L12 18.064l-7.335 3.864 1.403-8.188-5.952-5.808 8.216-1.192L12 .587z"/>
+        </svg>
         Guyanese Language & Culture Assistant
       </h1>
 
@@ -500,7 +644,7 @@ function App() {
       <section className="bg-white dark:bg-gray-800 shadow-xl rounded-2xl p-6 sm:p-8 mb-12 border border-gray-200 dark:border-gray-700">
         <h2 className="text-3xl font-bold mb-6 text-gray-800 dark:text-gray-100">Text & Information Queries</h2>
         <textarea
-          className="w-full p-4 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 transition-colors duration-200"
+          className="w-full p-4 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-green-500 focus:outline-none bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 transition-colors duration-200"
           rows={5}
           placeholder="Ask me about Guyanese tribal languages, culture, history, or anything else..."
           value={textPrompt}
@@ -508,20 +652,31 @@ function App() {
           disabled={isLoadingText}
         />
         <div className="mt-4 flex flex-col sm:flex-row gap-4">
-          <button
-            onClick={() => handleTextQuery('gemini-2.5-flash', true)}
-            className="flex-1 px-6 py-3 bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-semibold rounded-lg shadow-md hover:from-purple-700 hover:to-indigo-700 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-opacity-75 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-            disabled={isLoadingText || !textPrompt.trim()}
-          >
-            {isLoadingText ? 'Searching...' : 'Search & Get Info (Up-to-Date)'}
-          </button>
-          <button
-            onClick={() => handleTextQuery('gemini-2.5-flash-lite', false)}
-            className="flex-1 px-6 py-3 bg-gradient-to-r from-pink-600 to-red-600 text-white font-semibold rounded-lg shadow-md hover:from-pink-700 hover:to-red-700 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:ring-opacity-75 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-            disabled={isLoadingText || !textPrompt.trim()}
-          >
-            {isLoadingText ? 'Thinking...' : 'Get Fast Response'}
-          </button>
+          {isLoadingText ? (
+            <button
+              onClick={handleStopTextQuery}
+              className="flex-1 px-6 py-3 bg-red-600 text-white font-semibold rounded-lg shadow-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-75 transition-all duration-200"
+            >
+              Stop Generating
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={() => handleTextQuery('gemini-2.5-flash', true)}
+                className="flex-1 px-6 py-3 bg-gradient-to-r from-green-600 to-yellow-600 text-white font-semibold rounded-lg shadow-md hover:from-green-700 hover:to-yellow-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-75 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={!textPrompt.trim()}
+              >
+                Search & Get Info (Up-to-Date)
+              </button>
+              <button
+                onClick={() => handleTextQuery('gemini-2.5-flash-lite', false)}
+                className="flex-1 px-6 py-3 bg-gradient-to-r from-red-600 to-yellow-600 text-white font-semibold rounded-lg shadow-md hover:from-red-700 hover:to-yellow-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-75 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={!textPrompt.trim()}
+              >
+                Get Fast Response
+              </button>
+            </>
+          )}
         </div>
 
         {textError && (
@@ -531,8 +686,8 @@ function App() {
         )}
 
         {textResponse && (
-          <div className="mt-6 p-4 bg-blue-50 dark:bg-gray-700 rounded-lg shadow-inner border border-blue-200 dark:border-gray-600">
-            <h3 className="text-xl font-semibold mb-3 text-blue-800 dark:text-blue-200">Response:</h3>
+          <div className="mt-6 p-4 bg-green-50 dark:bg-gray-700 rounded-lg shadow-inner border border-green-200 dark:border-gray-600">
+            <h3 className="text-xl font-semibold mb-3 text-green-800 dark:text-green-200">Response:</h3>
             <p className="text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{textResponse}</p>
             {groundingUrls.length > 0 && <UrlDisplay urls={groundingUrls} />}
           </div>
@@ -540,7 +695,7 @@ function App() {
       </section>
 
       {/* Live Audio Conversation Section */}
-      <section className="bg-white dark:bg-gray-800 shadow-xl rounded-2xl p-6 sm:p-8 mb-12 border border-gray-200 dark:border-gray-700">
+      <section className={`bg-white dark:bg-gray-800 shadow-xl rounded-2xl p-6 sm:p-8 mb-12 border border-gray-200 dark:border-gray-700 ${isLiveApiConnected ? 'ring-4 ring-yellow-400/50 animate-pulse-light' : ''}`}>
         <h2 className="text-3xl font-bold mb-6 text-gray-800 dark:text-gray-100">Live Audio Conversation</h2>
         {!isLiveApiSupported && (
           <p className="text-red-600 dark:text-red-400 mb-4">
@@ -569,7 +724,7 @@ function App() {
                 id="voice-select"
                 value={selectedLiveVoice}
                 onChange={(e) => setSelectedLiveVoice(e.target.value)}
-                className="flex-grow p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-blue-500 focus:border-blue-500 min-w-40"
+                className="flex-grow p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-green-500 focus:border-green-500 min-w-40"
                 disabled={isVoiceControlsDisabled}
                 aria-label="Select assistant voice"
               >
@@ -579,7 +734,7 @@ function App() {
               </select>
               <button
                 onClick={() => handlePreviewVoice(selectedLiveVoice)}
-                className={`px-4 py-2 bg-blue-500 text-white font-semibold rounded-lg shadow-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-opacity-75 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed
+                className={`px-4 py-2 bg-yellow-500 text-white font-semibold rounded-lg shadow-md hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 focus:ring-opacity-75 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed
                   ${playingPreviewVoice === selectedLiveVoice ? 'animate-pulse' : ''}`}
                 disabled={isVoiceControlsDisabled}
               >
@@ -590,7 +745,7 @@ function App() {
         </div>
 
         {liveApiConnecting && (
-          <div className="text-center text-blue-600 dark:text-blue-400 mb-4">
+          <div className="text-center text-green-600 dark:text-green-400 mb-4">
             Establishing connection... Please ensure you grant microphone access.
           </div>
         )}
@@ -604,8 +759,21 @@ function App() {
         {isLiveApiConnected && (
           <div className="mt-6 p-4 bg-yellow-50 dark:bg-gray-700 rounded-lg shadow-inner border border-yellow-200 dark:border-gray-600">
             <h3 className="text-xl font-semibold mb-3 text-yellow-800 dark:text-yellow-200">Live Transcript:</h3>
+            {/* Input Audio Visualization */}
+            <div className="flex justify-center items-center h-20 mb-4 bg-gray-100 dark:bg-gray-800 rounded-lg p-2">
+              <canvas ref={canvasRef} width="300" height="80" className="bg-transparent"></canvas>
+            </div>
+            {/* Listening Indicator */}
+            {!isAssistantSpeaking && !liveApiConnecting && (
+              <p className="text-center text-green-600 dark:text-green-400 flex items-center justify-center gap-2 mb-4">
+                <svg className="w-5 h-5 animate-pulse" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                  <path fillRule="evenodd" d="M7 4a3 3 0 00-3 3v4a5 5 0 0010 0V7a3 3 0 00-3-3H7zm2.293 11.293a1 1 0 001.414 0l2-2a1 1 0 00-1.414-1.414L11 13.586V10a1 1 0 10-2 0v3.586l-.293-.293a1 1 0 00-1.414 1.414l2 2z" clipRule="evenodd"></path>
+                </svg>
+                Listening...
+              </p>
+            )}
             <TranscriptionDisplay label="You" text={liveInputTranscription} />
-            <TranscriptionDisplay label="Assistant" text={liveOutputTranscription} />
+            <TranscriptionDisplay label="Assistant" text={liveOutputTranscription} isSpeaking={isAssistantSpeaking} />
             <p className="text-sm text-gray-500 dark:text-gray-400 mt-4">
               Speak into your microphone. The assistant will respond in real-time.
             </p>
@@ -614,7 +782,7 @@ function App() {
       </section>
 
       <footer className="text-center mt-12 text-gray-600 dark:text-gray-400 text-sm">
-        Powered by Google Gemini API. Please review Google's <a href={API_KEY_BILLING_URL} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline dark:text-blue-400">billing information</a> for API usage.
+        Powered by Google Gemini API. Please review Google's <a href={API_KEY_BILLING_URL} target="_blank" rel="noopener noreferrer" className="text-green-600 hover:underline dark:text-green-400">billing information</a> for API usage.
       </footer>
     </div>
   );
