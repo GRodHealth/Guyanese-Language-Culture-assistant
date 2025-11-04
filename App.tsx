@@ -92,9 +92,11 @@ function App() {
   const sessionPromiseRef = useRef<Promise<any> | null>(null); // The actual session object will resolve from this promise
   const textAbortControllerRef = useRef<AbortController | null>(null); // For cancelling text generation
 
-  const canvasRef = useRef<HTMLCanvasElement>(null); // For audio visualization
+  const canvasRef = useRef<HTMLCanvasElement>(null); // For audio visualization (frequency)
   const analyserRef = useRef<AnalyserNode | null>(null); // For audio analysis
   const animationFrameIdRef = useRef<number | null>(null); // For animation loop
+
+  const volumeMeterRef = useRef<HTMLDivElement>(null); // Ref for the volume meter bar
 
   // Initialize AudioContexts only when needed or on first user interaction
   const getOutputAudioContext = useCallback(() => {
@@ -333,6 +335,10 @@ function App() {
       const canvasCtx = canvasRef.current.getContext('2d');
       if (canvasCtx) canvasCtx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
     }
+    // Reset volume meter
+    if (volumeMeterRef.current) {
+      volumeMeterRef.current.style.width = '0%';
+    }
   }, []);
 
   const stopLiveConversation = useCallback(() => {
@@ -371,7 +377,9 @@ function App() {
   const drawAudioVisualization = useCallback(() => {
     const canvas = canvasRef.current;
     const analyser = analyserRef.current;
-    if (!canvas || !analyser) return;
+    const volumeMeter = volumeMeterRef.current;
+
+    if (!canvas || !analyser || !volumeMeter) return;
 
     const canvasCtx = canvas.getContext('2d');
     if (!canvasCtx) return;
@@ -382,6 +390,7 @@ function App() {
     analyser.fftSize = 256; // Smaller FFT size for quicker visual
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength); // Array for frequency data
+    const dataArrayTime = new Uint8Array(analyser.fftSize); // Array for time domain data (volume)
 
     canvasCtx.clearRect(0, 0, WIDTH, HEIGHT); // Clear canvas once initially
 
@@ -394,6 +403,7 @@ function App() {
         return;
       }
 
+      // --- Frequency Visualization (Canvas) ---
       analyser.getByteFrequencyData(dataArray); // Get frequency data
 
       canvasCtx.fillStyle = 'rgb(0, 0, 0, 0)'; // Transparent background
@@ -415,6 +425,21 @@ function App() {
         canvasCtx.fillRect(x, HEIGHT - barHeight, barWidth, barHeight); // Draw from bottom up
 
         x += barWidth + 1; // Spacing between bars
+      }
+
+      // --- Volume Meter (HTML Div) ---
+      analyser.getByteTimeDomainData(dataArrayTime); // Get time domain data
+
+      let sumOfSquares = 0;
+      for (let i = 0; i < dataArrayTime.length; i++) {
+        const value = (dataArrayTime[i] - 128) / 128.0; // Normalize to -1 to 1
+        sumOfSquares += value * value;
+      }
+      const rms = Math.sqrt(sumOfSquares / dataArrayTime.length); // Calculate RMS
+      const volumePercent = Math.min(100, rms * 400); // Scale RMS (0-1) to 0-100%, adjust multiplier for sensitivity
+
+      if (volumeMeterRef.current) {
+        volumeMeterRef.current.style.width = `${volumePercent}%`;
       }
     };
     draw(); // Start the drawing loop
@@ -763,14 +788,29 @@ function App() {
             <div className="flex justify-center items-center h-20 mb-4 bg-gray-100 dark:bg-gray-800 rounded-lg p-2">
               <canvas ref={canvasRef} width="300" height="80" className="bg-transparent"></canvas>
             </div>
-            {/* Listening Indicator */}
+            {/* Listening Indicator with Volume Meter */}
             {!isAssistantSpeaking && !liveApiConnecting && (
-              <p className="text-center text-green-600 dark:text-green-400 flex items-center justify-center gap-2 mb-4">
-                <svg className="w-5 h-5 animate-pulse" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
-                  <path fillRule="evenodd" d="M7 4a3 3 0 00-3 3v4a5 5 0 0010 0V7a3 3 0 00-3-3H7zm2.293 11.293a1 1 0 001.414 0l2-2a1 1 0 00-1.414-1.414L11 13.586V10a1 1 0 10-2 0v3.586l-.293-.293a1 1 0 00-1.414 1.414l2 2z" clipRule="evenodd"></path>
-                </svg>
-                Listening...
-              </p>
+              <div className="flex items-center justify-center gap-2 mb-4">
+                <p className="text-center text-green-600 dark:text-green-400 flex items-center gap-2">
+                  <svg className="w-5 h-5 animate-pulse" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                    <path fillRule="evenodd" d="M7 4a3 3 0 00-3 3v4a5 5 0 0010 0V7a3 3 0 00-3-3H7zm2.293 11.293a1 1 0 001.414 0l2-2a1 1 0 00-1.414-1.414L11 13.586V10a1 1 0 10-2 0v3.586l-.293-.293a1 1 0 00-1.414 1.414l2 2z" clipRule="evenodd"></path>
+                  </svg>
+                  Listening...
+                </p>
+                {/* Volume Meter Bar */}
+                <div className="w-24 h-4 bg-gray-300 dark:bg-gray-600 rounded-full overflow-hidden">
+                  <div
+                    ref={volumeMeterRef}
+                    className="h-full bg-blue-500 transition-all ease-out duration-75"
+                    style={{ width: '0%' }} // Initial width
+                    aria-label="Input volume level"
+                    role="progressbar"
+                    aria-valuenow={0}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                  ></div>
+                </div>
+              </div>
             )}
             <TranscriptionDisplay label="You" text={liveInputTranscription} />
             <TranscriptionDisplay label="Assistant" text={liveOutputTranscription} isSpeaking={isAssistantSpeaking} />
