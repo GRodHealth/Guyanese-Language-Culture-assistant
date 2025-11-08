@@ -40,7 +40,28 @@ const UrlDisplay: React.FC<UrlDisplayProps> = ({ urls }) => (
   </div>
 );
 
-const SYSTEM_INSTRUCTION_BASE = `You are a helpful, knowledgeable, and engaging teacher specializing in Guyanese tribal languages, culture, and history. Your primary goal is to educate English speakers about these fascinating topics.
+const GUYANESE_LANGUAGES = ['English', 'Macushi', 'Patamona', 'Wapishana', 'Arekuna', 'Carib', 'Warrau'];
+const AVAILABLE_VOICES = ['Zephyr', 'Kore', 'Puck', 'Charon', 'Fenrir']; // Define available voices
+
+const getSystemInstruction = (inputLang: string, outputLang: string): string => {
+  let instruction = `You are a helpful, knowledgeable, and engaging teacher specializing in Guyanese tribal languages, culture, and history. Your primary goal is to educate English speakers about these fascinating topics.`;
+
+  if (inputLang !== outputLang) {
+    instruction += ` The user will communicate in ${inputLang}. You must translate or interpret their input and respond in ${outputLang}.`;
+    if (outputLang !== 'English') {
+      instruction += ` When responding in ${outputLang}, always provide an English translation for clarity, and if appropriate, phonetic guidance (e.g., using IPA or common English sound approximations).`;
+    }
+     if (inputLang !== 'English' && outputLang === 'English') {
+      instruction += ` When interpreting from ${inputLang}, provide context and explain any linguistic or cultural nuances in English.`;
+    }
+  } else {
+    instruction += ` You will converse with the user entirely in ${inputLang}.`;
+    if (inputLang !== 'English') {
+      instruction += ` When using ${inputLang}, provide English translations and phonetic guidance for key terms or phrases to aid learning.`;
+    }
+  }
+
+  instruction += `
 
 When discussing the languages themselves, delve into linguistic nuances. Explain specific phonemes or sounds unique to these languages, grammatical structures that differ from English, and unique vocabulary that reflects the cultural concepts and environment of Guyanese tribal communities. Provide clear and concise explanations, making complex linguistic concepts accessible to a lay audience.
 
@@ -50,9 +71,11 @@ Integrate deep cultural context into your explanations. Share information about 
 *   **Ceremonies and Rituals:** Describe how language is integral to rituals, blessings, prayers, initiation rites, healing ceremonies, or traditional gatherings. Are there sacred words or phrases, or specific linguistic protocols to follow?
 *   **Everyday Life:** Offer insights into common phrases, greetings, terms of endearment, proverbs, or expressions used in daily interactions, and what they reveal about the culture's values, social structures, and worldview.
 
-Where possible, provide actual words or short phrases from the tribal languages, always accompanied by clear English translations and, if relevant, phonetic guidance (e.g., using IPA or common English sound approximations).
-
 Be encouraging, respectful, and informative, fostering a sense of curiosity and appreciation for the rich heritage of Guyanese tribal communities. If asked about dangerous topics like self-harm, immediately provide a suicide prevention hotline and local resources, starting with the highest-rated and most reviewed options available.`;
+
+return instruction;
+};
+
 
 const suicideKeywords = [
   'suicidal', 'kill myself', 'ending it', 'want to die', 'take my own life',
@@ -64,7 +87,6 @@ const checkSuicidalIntent = (text: string): boolean => {
   return suicideKeywords.some(keyword => lowerText.includes(keyword));
 };
 
-const AVAILABLE_VOICES = ['Zephyr', 'Kore', 'Puck', 'Charon', 'Fenrir']; // Define available voices
 
 function App() {
   const [textPrompt, setTextPrompt] = useState<string>('');
@@ -72,6 +94,9 @@ function App() {
   const [groundingUrls, setGroundingUrls] = useState<{ uri: string; title: string }[]>([]);
   const [isLoadingText, setIsLoadingText] = useState<boolean>(false);
   const [textError, setTextError] = useState<string | null>(null);
+
+  const [selectedTextInputLanguage, setSelectedTextInputLanguage] = useState<string>('English');
+  const [selectedTextOutputLanguage, setSelectedTextOutputLanguage] = useState<string>('English');
 
   const [isLiveApiSupported, setIsLiveApiSupported] = useState<boolean>(false);
   const [isLiveApiConnected, setIsLiveApiConnected] = useState<boolean>(false);
@@ -82,6 +107,9 @@ function App() {
   const [selectedLiveVoice, setSelectedLiveVoice] = useState<string>(AVAILABLE_VOICES[0]); // State for selected voice
   const [playingPreviewVoice, setPlayingPreviewVoice] = useState<string | null>(null); // State for voice preview
   const [isAssistantSpeaking, setIsAssistantSpeaking] = useState<boolean>(false); // New state for speaking indicator
+
+  const [selectedLiveInputLanguage, setSelectedLiveInputLanguage] = useState<string>('English');
+  const [selectedLiveOutputLanguage, setSelectedLiveOutputLanguage] = useState<string>('English');
 
   const audioContextRef = useRef<AudioContext | null>(null); // For input audio
   const outputAudioContextRef = useRef<AudioContext | null>(null); // For output audio (TTS and Live API)
@@ -284,7 +312,7 @@ function App() {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const config: any = {
-        systemInstruction: SYSTEM_INSTRUCTION_BASE,
+        systemInstruction: getSystemInstruction(selectedTextInputLanguage, selectedTextOutputLanguage),
         signal: controller.signal, // Pass the abort signal
       };
 
@@ -323,7 +351,7 @@ function App() {
       }
       setIsLoadingText(false);
     }
-  }, [textPrompt, handleApiError, handleTextToSpeech, stopAllAudioPlayback]);
+  }, [textPrompt, handleApiError, handleTextToSpeech, stopAllAudioPlayback, selectedTextInputLanguage, selectedTextOutputLanguage]);
 
 
   const stopAudioVisualization = useCallback(() => {
@@ -620,7 +648,7 @@ function App() {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedLiveVoice } }, // Use selected voice
           },
-          systemInstruction: SYSTEM_INSTRUCTION_BASE,
+          systemInstruction: getSystemInstruction(selectedLiveInputLanguage, selectedLiveOutputLanguage),
           outputAudioTranscription: {}, // Enable transcription for model output audio.
           inputAudioTranscription: {}, // Enable transcription for user input audio.
         },
@@ -630,7 +658,7 @@ function App() {
       handleApiError(error, 'Live API connection');
       stopLiveConversation(); // Ensure cleanup on connection error
     }
-  }, [handleApiError, getOutputAudioContext, selectedLiveVoice, stopAllAudioPlayback, stopLiveConversation, setIsAssistantSpeaking, drawAudioVisualization]); // Added drawAudioVisualization dependency
+  }, [handleApiError, getOutputAudioContext, selectedLiveVoice, stopAllAudioPlayback, stopLiveConversation, setIsAssistantSpeaking, drawAudioVisualization, selectedLiveInputLanguage, selectedLiveOutputLanguage]); // Added drawAudioVisualization dependency
 
   useEffect(() => {
     // Check for browser support for Live API features (MediaDevices, AudioContext)
@@ -654,6 +682,7 @@ function App() {
 
   const isAnyPreviewPlaying = playingPreviewVoice !== null;
   const isVoiceControlsDisabled = isLiveApiConnected || liveApiConnecting || isAnyPreviewPlaying;
+  const isTextControlsDisabled = isLoadingText;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-yellow-50 to-green-100 dark:from-gray-900 dark:to-emerald-950 text-gray-900 dark:text-gray-100 p-4 sm:p-6 lg:p-8">
@@ -668,10 +697,43 @@ function App() {
       {/* Text-based Query Section */}
       <section className="bg-white dark:bg-gray-800 shadow-xl rounded-2xl p-6 sm:p-8 mb-12 border border-gray-200 dark:border-gray-700">
         <h2 className="text-3xl font-bold mb-6 text-gray-800 dark:text-gray-100">Text & Information Queries</h2>
+        <div className="flex flex-col sm:flex-row gap-4 mb-6">
+          <div className="flex-1 flex flex-col gap-2">
+            <label htmlFor="text-input-lang-select" className="text-gray-700 dark:text-gray-300 font-medium">Your Language:</label>
+            <select
+              id="text-input-lang-select"
+              value={selectedTextInputLanguage}
+              onChange={(e) => setSelectedTextInputLanguage(e.target.value)}
+              className="p-3 border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-colors duration-200"
+              disabled={isTextControlsDisabled}
+              aria-label="Select your input language for text queries"
+            >
+              {GUYANESE_LANGUAGES.map(lang => (
+                <option key={`text-input-${lang}`} value={lang}>{lang}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex-1 flex flex-col gap-2">
+            <label htmlFor="text-output-lang-select" className="text-gray-700 dark:text-gray-300 font-medium">Assistant's Language:</label>
+            <select
+              id="text-output-lang-select"
+              value={selectedTextOutputLanguage}
+              onChange={(e) => setSelectedTextOutputLanguage(e.target.value)}
+              className="p-3 border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-colors duration-200"
+              disabled={isTextControlsDisabled}
+              aria-label="Select assistant's output language for text queries"
+            >
+              {GUYANESE_LANGUAGES.map(lang => (
+                <option key={`text-output-${lang}`} value={lang}>{lang}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
         <textarea
           className="w-full p-4 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-green-500 focus:outline-none bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 transition-colors duration-200"
           rows={5}
-          placeholder="Ask me about Guyanese tribal languages, culture, history, or anything else..."
+          placeholder={`Ask me about Guyanese tribal languages, culture, history, or anything else in ${selectedTextInputLanguage}...`}
           value={textPrompt}
           onChange={(e) => setTextPrompt(e.target.value)}
           disabled={isLoadingText}
@@ -729,7 +791,40 @@ function App() {
         )}
 
         <div className="flex flex-col gap-4 mb-6">
-          <div className="flex flex-col sm:flex-row gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="flex flex-col gap-2">
+              <label htmlFor="live-input-lang-select" className="text-gray-700 dark:text-gray-300 font-medium">Your Language:</label>
+              <select
+                id="live-input-lang-select"
+                value={selectedLiveInputLanguage}
+                onChange={(e) => setSelectedLiveInputLanguage(e.target.value)}
+                className="p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-green-500 focus:border-green-500"
+                disabled={isVoiceControlsDisabled}
+                aria-label="Select your input language for live conversation"
+              >
+                {GUYANESE_LANGUAGES.map(lang => (
+                  <option key={`live-input-${lang}`} value={lang}>{lang}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex flex-col gap-2">
+              <label htmlFor="live-output-lang-select" className="text-gray-700 dark:text-gray-300 font-medium">Assistant's Language:</label>
+              <select
+                id="live-output-lang-select"
+                value={selectedLiveOutputLanguage}
+                onChange={(e) => setSelectedLiveOutputLanguage(e.target.value)}
+                className="p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-green-500 focus:border-green-500"
+                disabled={isVoiceControlsDisabled}
+                aria-label="Select assistant's output language for live conversation"
+              >
+                {GUYANESE_LANGUAGES.map(lang => (
+                  <option key={`live-output-${lang}`} value={lang}>{lang}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-4 mt-2">
             <button
               onClick={isLiveApiConnected ? stopLiveConversation : startLiveConversation}
               className={`flex-1 px-6 py-3 text-white font-semibold rounded-lg shadow-md focus:outline-none focus:ring-2 focus:ring-opacity-75 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed
