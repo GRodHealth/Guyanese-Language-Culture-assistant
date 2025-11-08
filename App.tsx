@@ -87,6 +87,17 @@ const checkSuicidalIntent = (text: string): boolean => {
   return suicideKeywords.some(keyword => lowerText.includes(keyword));
 };
 
+// New interface for vocabulary items
+interface VocabularyItem {
+  id: string;
+  word: string; // The word/phrase to learn
+  wordLanguage: string; // Language of the word
+  translation: string; // The translation
+  translationLanguage: string; // Language of the translation
+  audioBase64: string | null; // Base64 audio for the word
+  timestamp: number;
+}
+
 
 function App() {
   const [textPrompt, setTextPrompt] = useState<string>('');
@@ -110,6 +121,17 @@ function App() {
 
   const [selectedLiveInputLanguage, setSelectedLiveInputLanguage] = useState<string>('English');
   const [selectedLiveOutputLanguage, setSelectedLiveOutputLanguage] = useState<string>('English');
+
+  // Vocabulary Builder states
+  const [vocabularyList, setVocabularyList] = useState<VocabularyItem[]>([]);
+  const [showAddVocabularyModal, setShowAddVocabularyModal] = useState<boolean>(false);
+  const [currentVocabularyWord, setCurrentVocabularyWord] = useState<string>('');
+  const [currentVocabularyTranslation, setCurrentVocabularyTranslation] = useState<string>('');
+  const [currentVocabularyWordLanguage, setCurrentVocabularyWordLanguage] = useState<string>('English');
+  const [currentVocabularyTranslationLanguage, setCurrentVocabularyTranslationLanguage] = useState<string>('English');
+  const [generatingVocabAudio, setGeneratingVocabAudio] = useState<boolean>(false);
+  const [playingVocabAudioId, setPlayingVocabAudioId] = useState<string | null>(null);
+
 
   const audioContextRef = useRef<AudioContext | null>(null); // For input audio
   const outputAudioContextRef = useRef<AudioContext | null>(null); // For output audio (TTS and Live API)
@@ -146,13 +168,14 @@ function App() {
     sourcesRef.current.clear();
     nextStartTimeRef.current = 0; // Reset nextStartTime for immediate playback if needed
     setIsAssistantSpeaking(false); // Explicitly set to false when stopping all
+    setPlayingVocabAudioId(null); // Stop any vocab audio playback
   }, []);
 
 
-  const playGeneratedAudio = useCallback(async (base64Audio: string) => { // Removed mimeType
+  const playGeneratedAudio = useCallback(async (base64Audio: string, itemId: string | null = null) => {
     setTextError(null); // Clear previous audio playback errors
 
-    stopAllAudioPlayback(); // Stop any currently playing audio (Live API or previous TTS)
+    stopAllAudioPlayback(); // Stop any currently playing audio (Live API, previous TTS, or vocab preview)
 
     const outputAudioContext = getOutputAudioContext(); // Get the shared output AudioContext
 
@@ -173,15 +196,20 @@ function App() {
         sourcesRef.current.delete(source);
         if (sourcesRef.current.size === 0) { // Check if no more audio is playing
           setIsAssistantSpeaking(false);
+          setPlayingVocabAudioId(null); // Clear vocab audio ID
         }
       });
 
       source.start(outputAudioContext.currentTime); // Start immediately
       sourcesRef.current.add(source); // Add to the set of sources
       setIsAssistantSpeaking(true); // Set to true when audio starts
+      if (itemId) {
+        setPlayingVocabAudioId(itemId); // Set the ID of the vocabulary item currently playing
+      }
       return true;
     } catch (error) {
       setIsAssistantSpeaking(false); // Ensure false on error
+      setPlayingVocabAudioId(null); // Clear vocab audio ID on error
       console.error("Error during audio decoding or playback:", error);
       let message = "Failed to decode or play audio.";
       if (error instanceof DOMException) {
@@ -192,37 +220,71 @@ function App() {
       setTextError(message);
       return false;
     }
-  }, [getOutputAudioContext, stopAllAudioPlayback, setIsAssistantSpeaking]);
+  }, [getOutputAudioContext, stopAllAudioPlayback, setIsAssistantSpeaking, setPlayingVocabAudioId]);
 
 
   const handleApiError = useCallback((error: any, context: string) => {
     console.error(`Error in ${context}:`, error);
-    let errorMessage = `An error occurred during ${context}.`;
+    let userFacingMessage = `An unexpected error occurred during ${context}. Please try again.`;
+    let shouldPromptApiKey = false;
+
+    // Reset specific loading states if they are active
+    setIsLoadingText(false);
+    setLiveApiConnecting(false);
+    setGeneratingVocabAudio(false);
+
+    // Handle user-initiated abort
     if (error instanceof DOMException && error.name === 'AbortError') {
       console.debug(`${context} aborted by user.`);
-      // Do not display an error message for user-initiated aborts
       setTextError(null);
       setLiveError(null);
-      setIsLoadingText(false); // Ensure loading state is reset
-      setLiveApiConnecting(false); // Ensure live connection state is reset
-      return;
-    } else if (error instanceof Error) {
-      errorMessage = error.message;
-    } else if (typeof error === 'string') {
-      errorMessage = error;
+      return; // Early exit for aborts
     }
-    setTextError(errorMessage); // This handles errors for text-based queries and TTS
-    setLiveApiConnecting(false);
-    setLiveError(errorMessage); // This handles errors for Live API
-    if (errorMessage.includes("Requested entity was not found.")) {
-      alert("API Key might be invalid or not selected. Please select your API key again.");
-      // NOTE: `window.aistudio` is assumed to be globally available and valid.
-      // Do not generate UI elements for API key, per coding guidelines.
-      // This is a special instruction for API Key selection for Veo models.
-      // However, the error message indicates a general API key issue, so prompting selection here is appropriate.
-      // The instruction specifically says:
-      // "If the request fails with an error message containing "Requested entity was not found.", reset the key selection state and prompt the user to select a key again via `openSelectKey()`."
-      // This applies to *any* request failure that suggests a key problem.
+
+    // Try to parse the error message if it looks like JSON from the API
+    let apiErrorDetails: any = null;
+    if (error instanceof Error && error.message.startsWith('{') && error.message.endsWith('}')) {
+      try {
+        apiErrorDetails = JSON.parse(error.message);
+        if (apiErrorDetails.error) {
+          apiErrorDetails = apiErrorDetails.error; // Extract the inner error object if present
+        }
+      } catch (parseError) {
+        console.warn("Could not parse error message as JSON:", parseError);
+      }
+    }
+
+    // Determine specific error details
+    const errorCode = apiErrorDetails?.code || error.status; // status might be available on network errors
+    const errorMessage = apiErrorDetails?.message || (error instanceof Error ? error.message : String(error));
+    // const errorStatus = apiErrorDetails?.status; // Not used directly in logic but can be helpful for debug
+
+    if (errorMessage.includes('Failed to fetch') || error instanceof TypeError) {
+      userFacingMessage = `Network error: Failed to connect to the server during ${context}. Please check your internet connection.`;
+    } else if (errorMessage.includes('API key not valid') || errorMessage.includes('Permission denied') || errorMessage.includes('Unauthorized') || errorCode === 401 || errorCode === 403) {
+      userFacingMessage = `Authentication error: Your API key is invalid or lacks necessary permissions for ${context}. Please select or provide a valid API key.`;
+      shouldPromptApiKey = true;
+    } else if (errorMessage.includes('INVALID_ARGUMENT') || errorCode === 400) {
+      userFacingMessage = `Invalid request: The input provided for ${context} is invalid or malformed. This might be due to an unsupported configuration or prompt. (Details: ${errorMessage})`;
+    } else if (errorMessage.includes('Resource exhausted') || errorCode === 429) {
+      userFacingMessage = `Rate limit exceeded: You've made too many requests to the API for ${context}. Please wait a moment and try again.`;
+    } else if (errorMessage.includes('Quota exceeded')) {
+      userFacingMessage = `Quota Exceeded: Your API quota for ${context} has been exceeded. Please check your billing or usage limits.`;
+      shouldPromptApiKey = true; // Often quota issues are tied to the key.
+    } else if (errorCode >= 500) {
+      userFacingMessage = `Server error: The API service is currently unavailable for ${context}. Please try again later.`;
+    } else if (errorMessage.includes("Requested entity was not found.")) {
+      // This is a common error for an invalid key if the request can't even be routed to the correct service.
+      userFacingMessage = `API Key issue: The requested resource for ${context} was not found, possibly due to an invalid or unselected API key. Please try selecting your API key again.`;
+      shouldPromptApiKey = true;
+    }
+
+    setTextError(userFacingMessage);
+    setLiveError(userFacingMessage);
+
+    // Prompt for API key if identified as an API key issue
+    if (shouldPromptApiKey) {
+      alert(userFacingMessage + "\n\nYou can find billing information at " + API_KEY_BILLING_URL);
       window.aistudio.openSelectKey();
     }
   }, []);
@@ -230,7 +292,6 @@ function App() {
   const handleTextToSpeech = useCallback(async (textToSpeak: string, voiceName: string = 'Kore') => {
     setTextError(null); // Clear previous errors
     if (!textToSpeak) {
-      // alert("Nothing to speak!"); // This alert might be annoying for internal calls, better to just return.
       return false; // Indicate failure
     }
     try {
@@ -250,7 +311,7 @@ function App() {
 
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (base64Audio) {
-        await playGeneratedAudio(base64Audio); // Updated call
+        await playGeneratedAudio(base64Audio);
         return true; // Indicate success
       } else {
         throw new Error("No audio data received for TTS.");
@@ -266,13 +327,35 @@ function App() {
     setPlayingPreviewVoice(voiceName);
     const phrase = `Hello, I am the ${voiceName} voice.`;
     try {
-      await handleTextToSpeech(phrase, voiceName);
+      // Reusing handleTextToSpeech, but passing specific voiceName
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash-preview-tts",
+        contents: [{ parts: [{ text: phrase }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: voiceName },
+            },
+          },
+        },
+      });
+
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (base64Audio) {
+        await playGeneratedAudio(base64Audio); // Use general playGeneratedAudio
+      } else {
+        throw new Error("No audio data received for voice preview.");
+      }
     } catch (error) {
-      // Error handling is already in handleTextToSpeech
+      handleApiError(error, 'voice preview');
     } finally {
-      setPlayingPreviewVoice(null);
+      // setPlayingPreviewVoice(null) is handled by playGeneratedAudio's 'ended' event
+      // if audio plays. If error, handleApiError will unset generating states.
     }
-  }, [handleTextToSpeech]);
+  }, [handleApiError, playGeneratedAudio]);
+
 
   const handleStopTextQuery = useCallback(() => {
     if (textAbortControllerRef.current) {
@@ -341,7 +424,7 @@ function App() {
       }
 
       // Automatically speak the response
-      await handleTextToSpeech(responseText);
+      await handleTextToSpeech(responseText, selectedLiveVoice); // Use selectedLiveVoice for TTS
 
     } catch (error) {
       handleApiError(error, 'text generation');
@@ -351,7 +434,7 @@ function App() {
       }
       setIsLoadingText(false);
     }
-  }, [textPrompt, handleApiError, handleTextToSpeech, stopAllAudioPlayback, selectedTextInputLanguage, selectedTextOutputLanguage]);
+  }, [textPrompt, handleApiError, handleTextToSpeech, stopAllAudioPlayback, selectedTextInputLanguage, selectedTextOutputLanguage, selectedLiveVoice]);
 
 
   const stopAudioVisualization = useCallback(() => {
@@ -658,7 +741,7 @@ function App() {
       handleApiError(error, 'Live API connection');
       stopLiveConversation(); // Ensure cleanup on connection error
     }
-  }, [handleApiError, getOutputAudioContext, selectedLiveVoice, stopAllAudioPlayback, stopLiveConversation, setIsAssistantSpeaking, drawAudioVisualization, selectedLiveInputLanguage, selectedLiveOutputLanguage]); // Added drawAudioVisualization dependency
+  }, [handleApiError, getOutputAudioContext, selectedLiveVoice, stopAllAudioPlayback, stopLiveConversation, setIsAssistantSpeaking, drawAudioVisualization, selectedLiveInputLanguage, selectedLiveOutputLanguage]);
 
   useEffect(() => {
     // Check for browser support for Live API features (MediaDevices, AudioContext)
@@ -670,6 +753,12 @@ function App() {
     };
     checkLiveApiSupport();
 
+    // Load vocabulary from local storage on mount
+    const storedVocab = localStorage.getItem('guyaneseVocabList');
+    if (storedVocab) {
+      setVocabularyList(JSON.parse(storedVocab));
+    }
+
     // Cleanup on unmount
     return () => {
       stopLiveConversation(); // Ensure session is closed when component unmounts
@@ -680,12 +769,164 @@ function App() {
     };
   }, [stopLiveConversation]);
 
+  // Save vocabulary to local storage whenever it changes
+  useEffect(() => {
+    localStorage.setItem('guyaneseVocabList', JSON.stringify(vocabularyList));
+  }, [vocabularyList]);
+
+  // Handlers for Vocabulary Builder
+  const handleOpenAddVocabularyModal = useCallback((source: 'text' | 'live') => {
+    setShowAddVocabularyModal(true);
+    // Pre-fill based on context, allowing user to refine
+    if (source === 'text') {
+      setCurrentVocabularyWord(textResponse.split('\n')[0].trim().substring(0, 100)); // First line of response
+      setCurrentVocabularyTranslation(textPrompt.trim().substring(0, 100)); // User's prompt
+      setCurrentVocabularyWordLanguage(selectedTextOutputLanguage);
+      setCurrentVocabularyTranslationLanguage(selectedTextInputLanguage);
+    } else if (source === 'live') {
+      setCurrentVocabularyWord(liveOutputTranscription.trim().substring(0, 100)); // Last assistant utterance
+      setCurrentVocabularyTranslation(liveInputTranscription.trim().substring(0, 100)); // Last user utterance
+      setCurrentVocabularyWordLanguage(selectedLiveOutputLanguage);
+      setCurrentVocabularyTranslationLanguage(selectedLiveInputLanguage);
+    }
+    // Clear any previous error
+    setTextError(null);
+  }, [textResponse, textPrompt, selectedTextOutputLanguage, selectedTextInputLanguage, liveOutputTranscription, liveInputTranscription, selectedLiveOutputLanguage, selectedLiveInputLanguage]);
+
+  const handleCloseAddVocabularyModal = useCallback(() => {
+    setShowAddVocabularyModal(false);
+    setCurrentVocabularyWord('');
+    setCurrentVocabularyTranslation('');
+    setCurrentVocabularyWordLanguage('English');
+    setCurrentVocabularyTranslationLanguage('English');
+    setGeneratingVocabAudio(false);
+    setTextError(null); // Clear any related error
+  }, []);
+
+  const handleGenerateVocabAudioForModal = useCallback(async () => {
+    if (!currentVocabularyWord.trim()) {
+      setTextError("Please enter a word or phrase to generate audio.");
+      return null;
+    }
+    setGeneratingVocabAudio(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash-preview-tts",
+        contents: [{ parts: [{ text: currentVocabularyWord }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedLiveVoice } }, // Use selected live voice for consistency
+          },
+        },
+      });
+
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (base64Audio) {
+        // Temporarily play the audio for preview
+        await playGeneratedAudio(base64Audio);
+        return base64Audio;
+      } else {
+        throw new Error("No audio data received for vocabulary word.");
+      }
+    } catch (error) {
+      handleApiError(error, 'vocabulary audio generation');
+      return null;
+    } finally {
+      setGeneratingVocabAudio(false);
+    }
+  }, [currentVocabularyWord, selectedLiveVoice, handleApiError, playGeneratedAudio]);
+
+  const handleAddVocabularyItem = useCallback(async () => {
+    if (!currentVocabularyWord.trim() || !currentVocabularyTranslation.trim()) {
+      setTextError("Both word/phrase and translation are required.");
+      return;
+    }
+
+    setTextError("Generating audio and saving..."); // Provide feedback
+    const finalAudioBase64 = await handleGenerateVocabAudioForModal(); // This will also handle errors
+
+    if (!finalAudioBase64) {
+      // Error already handled by handleGenerateVocabAudioForModal
+      return; // Stop if audio generation fails
+    }
+
+    const newItem: VocabularyItem = {
+      id: Date.now().toString(), // Simple unique ID
+      word: currentVocabularyWord.trim(),
+      wordLanguage: currentVocabularyWordLanguage,
+      translation: currentVocabularyTranslation.trim(),
+      translationLanguage: currentVocabularyTranslationLanguage,
+      audioBase64: finalAudioBase64,
+      timestamp: Date.now(),
+    };
+    setVocabularyList(prevList => [...prevList, newItem]);
+    handleCloseAddVocabularyModal(); // Close modal after adding
+  }, [currentVocabularyWord, currentVocabularyTranslation, currentVocabularyWordLanguage, currentVocabularyTranslationLanguage, handleCloseAddVocabularyModal, handleGenerateVocabAudioForModal]);
+
+  const handlePlayVocabularyAudio = useCallback(async (item: VocabularyItem) => {
+    if (playingVocabAudioId === item.id) {
+      stopAllAudioPlayback(); // Stop if already playing this item
+      return;
+    }
+
+    if (item.audioBase64) {
+      await playGeneratedAudio(item.audioBase64, item.id); // Pass item.id for tracking
+    } else {
+      // If no audio, generate and then play
+      setGeneratingVocabAudio(true); // Reusing this for general vocab audio loading
+      try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const response = await ai.models.generateContent({
+          model: "gemini-2.5-flash-preview-tts",
+          contents: [{ parts: [{ text: item.word }] }],
+          config: {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: {
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedLiveVoice } },
+            },
+          },
+        });
+        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (base64Audio) {
+          setVocabularyList(prevList =>
+            prevList.map(vItem => (vItem.id === item.id ? { ...vItem, audioBase64: base64Audio } : vItem))
+          );
+          await playGeneratedAudio(base64Audio, item.id);
+        } else {
+          throw new Error("No audio data received for vocabulary item.");
+        }
+      } catch (error) {
+        handleApiError(error, `generating audio for '${item.word}'`);
+      } finally {
+        setGeneratingVocabAudio(false);
+      }
+    }
+  }, [playingVocabAudioId, playGeneratedAudio, selectedLiveVoice, handleApiError, stopAllAudioPlayback]);
+
+
+  const handleDeleteVocabularyItem = useCallback((id: string) => {
+    if (window.confirm("Are you sure you want to delete this vocabulary item?")) {
+      setVocabularyList(prevList => prevList.filter(item => item.id !== id));
+      stopAllAudioPlayback(); // Stop any audio related to the deleted item
+    }
+  }, [stopAllAudioPlayback]);
+
+  const handleClearAllVocabulary = useCallback(() => {
+    if (window.confirm("Are you sure you want to clear ALL saved vocabulary? This cannot be undone.")) {
+      setVocabularyList([]);
+      stopAllAudioPlayback(); // Stop any playing audio
+    }
+  }, [stopAllAudioPlayback]);
+
   const isAnyPreviewPlaying = playingPreviewVoice !== null;
-  const isVoiceControlsDisabled = isLiveApiConnected || liveApiConnecting || isAnyPreviewPlaying;
+  const isVoiceControlsDisabled = isLiveApiConnected || liveApiConnecting || isAnyPreviewPlaying || generatingVocabAudio;
   const isTextControlsDisabled = isLoadingText;
+  const isVocabularyActionDisabled = generatingVocabAudio || isLoadingText || liveApiConnecting || isLiveApiConnected;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-yellow-50 to-green-100 dark:from-gray-900 dark:to-emerald-950 text-gray-900 dark:text-gray-100 p-4 sm:p-6 lg:p-8">
+    <div className="min-h-screen bg-gradient-to-br from-green-100 via-yellow-100 to-red-100 dark:from-green-900/80 dark:via-gray-900 dark:to-red-900/80 text-gray-900 dark:text-gray-100 p-4 sm:p-6 lg:p-8">
       <h1 className="flex items-center justify-center text-4xl sm:text-5xl font-extrabold text-center mb-10 text-transparent bg-clip-text bg-gradient-to-r from-yellow-600 to-green-700 dark:from-yellow-400 dark:to-green-400">
         {/* Stylized Star Icon - inspired by the Golden Arrowhead */}
         <svg className="w-8 h-8 mr-3 text-yellow-500 dark:text-yellow-300" fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -777,6 +1018,13 @@ function App() {
             <h3 className="text-xl font-semibold mb-3 text-green-800 dark:text-green-200">Response:</h3>
             <p className="text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{textResponse}</p>
             {groundingUrls.length > 0 && <UrlDisplay urls={groundingUrls} />}
+            <button
+              onClick={() => handleOpenAddVocabularyModal('text')}
+              className="mt-4 px-4 py-2 bg-purple-600 text-white font-semibold rounded-lg shadow-md hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-opacity-75 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={isVocabularyActionDisabled}
+            >
+              Add to Vocabulary
+            </button>
           </div>
         )}
       </section>
@@ -824,20 +1072,7 @@ function App() {
             </div>
           </div>
 
-          <div className="flex flex-col sm:flex-row gap-4 mt-2">
-            <button
-              onClick={isLiveApiConnected ? stopLiveConversation : startLiveConversation}
-              className={`flex-1 px-6 py-3 text-white font-semibold rounded-lg shadow-md focus:outline-none focus:ring-2 focus:ring-opacity-75 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed
-                ${isLiveApiConnected
-                  ? 'bg-red-600 hover:bg-red-700 focus:ring-red-500'
-                  : 'bg-green-600 hover:bg-green-700 focus:ring-green-500'
-                }`}
-              disabled={liveApiConnecting || !isLiveApiSupported}
-            >
-              {liveApiConnecting ? 'Connecting...' : (isLiveApiConnected ? 'Stop Conversation' : 'Start Conversation')}
-            </button>
-          </div>
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2 mt-2">
             <label htmlFor="voice-select" className="text-gray-700 dark:text-gray-300 font-medium">Assistant Voice:</label>
             <div className="flex flex-wrap items-center gap-2">
               <select
@@ -861,6 +1096,20 @@ function App() {
                 {playingPreviewVoice === selectedLiveVoice ? 'Playing...' : 'Preview'}
               </button>
             </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-4 mt-2">
+            <button
+              onClick={isLiveApiConnected ? stopLiveConversation : startLiveConversation}
+              className={`flex-1 px-6 py-3 text-white font-semibold rounded-lg shadow-md focus:outline-none focus:ring-2 focus:ring-opacity-75 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed
+                ${isLiveApiConnected
+                  ? 'bg-red-600 hover:bg-red-700 focus:ring-red-500'
+                  : 'bg-green-600 hover:bg-green-700 focus:ring-green-500'
+                }`}
+              disabled={liveApiConnecting || !isLiveApiSupported}
+            >
+              {liveApiConnecting ? 'Connecting...' : (isLiveApiConnected ? 'Stop Conversation' : 'Start Conversation')}
+            </button>
           </div>
         </div>
 
@@ -888,7 +1137,7 @@ function App() {
               <div className="flex items-center justify-center gap-2 mb-4">
                 <p className="text-center text-green-600 dark:text-green-400 flex items-center gap-2">
                   <svg className="w-5 h-5 animate-pulse" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
-                    <path fillRule="evenodd" d="M7 4a3 3 0 00-3 3v4a5 5 0 0010 0V7a3 3 0 00-3-3H7zm2.293 11.293a1 1 0 001.414 0l2-2a1 1 0 00-1.414-1.414L11 13.586V10a1 1 0 10-2 0v3.586l-.293-.293a1 1 0 00-1.414 1.414l2 2z" clipRule="evenodd"></path>
+                    <path fillRule="evenodd" d="M7 4a3 3 0 00-3 3v4a5 5 0 0010 0V7a3 3 0 00-3-3H7zm2.293 11.293a1 1 0 001.414 0l2-2a1 1 0 00-1.414-1.414L11 13.586V10a1 1 0 10-2 0v3.586l-.293-.293a1 1 0  00-1.414 1.414l2 2z" clipRule="evenodd"></path>
                   </svg>
                   Listening...
                 </p>
@@ -912,9 +1161,152 @@ function App() {
             <p className="text-sm text-gray-500 dark:text-gray-400 mt-4">
               Speak into your microphone. The assistant will respond in real-time.
             </p>
+            <button
+              onClick={() => handleOpenAddVocabularyModal('live')}
+              className="mt-4 px-4 py-2 bg-purple-600 text-white font-semibold rounded-lg shadow-md hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-opacity-75 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={isVocabularyActionDisabled || (!liveOutputTranscription.trim() && !liveInputTranscription.trim())}
+            >
+              Add to Vocabulary
+            </button>
           </div>
         )}
       </section>
+
+      {/* Vocabulary Builder Section */}
+      <section className="bg-white dark:bg-gray-800 shadow-xl rounded-2xl p-6 sm:p-8 mb-12 border border-gray-200 dark:border-gray-700">
+        <h2 className="text-3xl font-bold mb-6 text-gray-800 dark:text-gray-100">Vocabulary Builder</h2>
+
+        {vocabularyList.length === 0 ? (
+          <p className="text-gray-600 dark:text-gray-400">Your vocabulary list is empty. Add words and phrases to start learning!</p>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+              {vocabularyList.map((item) => (
+                <div key={item.id} className="bg-gray-100 dark:bg-gray-700 p-4 rounded-lg shadow-sm border border-gray-200 dark:border-gray-600 flex flex-col justify-between">
+                  <div>
+                    <p className="text-xl font-bold text-green-800 dark:text-green-300">{item.word} <span className="text-sm text-gray-500">({item.wordLanguage})</span></p>
+                    <p className="text-gray-700 dark:text-gray-300 mt-1">{item.translation} <span className="text-sm text-gray-500">({item.translationLanguage})</span></p>
+                  </div>
+                  <div className="flex justify-end gap-2 mt-3">
+                    <button
+                      onClick={() => handlePlayVocabularyAudio(item)}
+                      className={`px-3 py-1 bg-blue-500 text-white font-semibold rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed
+                        ${playingVocabAudioId === item.id ? 'animate-pulse' : ''}`}
+                      disabled={generatingVocabAudio || playingVocabAudioId === item.id}
+                      aria-label={`Play audio for ${item.word}`}
+                    >
+                      {playingVocabAudioId === item.id ? 'Playing...' : (item.audioBase64 ? 'Play Audio' : 'Generate & Play')}
+                    </button>
+                    <button
+                      onClick={() => handleDeleteVocabularyItem(item.id)}
+                      className="px-3 py-1 bg-red-500 text-white font-semibold rounded-md hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-400 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                      disabled={isVocabularyActionDisabled}
+                      aria-label={`Delete ${item.word}`}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {vocabularyList.length > 0 && (
+              <div className="mt-6 text-center">
+                <button
+                  onClick={handleClearAllVocabulary}
+                  className="px-6 py-3 bg-red-700 text-white font-semibold rounded-lg shadow-md hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-600 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={isVocabularyActionDisabled}
+                >
+                  Clear All Vocabulary
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </section>
+
+      {/* Add Vocabulary Modal */}
+      {showAddVocabularyModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 w-full max-w-md border border-gray-200 dark:border-gray-700">
+            <h3 className="text-2xl font-bold mb-4 text-gray-800 dark:text-gray-100">Add to Vocabulary</h3>
+            <div className="mb-4">
+              <label htmlFor="vocab-word" className="block text-gray-700 dark:text-gray-300 font-medium mb-1">Word/Phrase to Learn:</label>
+              <input
+                id="vocab-word"
+                type="text"
+                value={currentVocabularyWord}
+                onChange={(e) => setCurrentVocabularyWord(e.target.value)}
+                className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-green-500 focus:border-green-500"
+                placeholder="e.g., Kwe-Kwe"
+                disabled={generatingVocabAudio}
+              />
+            </div>
+            <div className="mb-4">
+              <label htmlFor="vocab-word-lang" className="block text-gray-700 dark:text-gray-300 font-medium mb-1">Language of Word:</label>
+              <select
+                id="vocab-word-lang"
+                value={currentVocabularyWordLanguage}
+                onChange={(e) => setCurrentVocabularyWordLanguage(e.target.value)}
+                className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-green-500 focus:border-green-500"
+                disabled={generatingVocabAudio}
+              >
+                {GUYANESE_LANGUAGES.map(lang => (
+                  <option key={`vocab-word-lang-${lang}`} value={lang}>{lang}</option>
+                ))}
+              </select>
+            </div>
+            <div className="mb-4">
+              <label htmlFor="vocab-translation" className="block text-gray-700 dark:text-gray-300 font-medium mb-1">Translation:</label>
+              <input
+                id="vocab-translation"
+                type="text"
+                value={currentVocabularyTranslation}
+                onChange={(e) => setCurrentVocabularyTranslation(e.target.value)}
+                className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-green-500 focus:border-green-500"
+                placeholder="e.g., Hello"
+                disabled={generatingVocabAudio}
+              />
+            </div>
+            <div className="mb-4">
+              <label htmlFor="vocab-translation-lang" className="block text-gray-700 dark:text-gray-300 font-medium mb-1">Language of Translation:</label>
+              <select
+                id="vocab-translation-lang"
+                value={currentVocabularyTranslationLanguage}
+                onChange={(e) => setCurrentVocabularyTranslationLanguage(e.target.value)}
+                className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-green-500 focus:border-green-500"
+                disabled={generatingVocabAudio}
+              >
+                {GUYANESE_LANGUAGES.map(lang => (
+                  <option key={`vocab-translation-lang-${lang}`} value={lang}>{lang}</option>
+                ))}
+              </select>
+            </div>
+
+            {textError && (
+              <p className="mt-4 text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900 p-3 rounded-md border border-red-200 dark:border-red-700">
+                Error: {textError}
+              </p>
+            )}
+
+            <div className="flex justify-end gap-3 mt-6">
+              <button
+                onClick={handleCloseAddVocabularyModal}
+                className="px-4 py-2 bg-gray-300 text-gray-800 font-semibold rounded-lg hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500 transition-colors duration-200"
+                disabled={generatingVocabAudio}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleAddVocabularyItem} // Trigger generation if needed, then add
+                className="px-4 py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={!currentVocabularyWord.trim() || !currentVocabularyTranslation.trim() || generatingVocabAudio}
+              >
+                {generatingVocabAudio ? 'Generating Audio...' : 'Save to List'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <footer className="text-center mt-12 text-gray-600 dark:text-gray-400 text-sm">
         Powered by Google Gemini API. Please review Google's <a href={API_KEY_BILLING_URL} target="_blank" rel="noopener noreferrer" className="text-green-600 hover:underline dark:text-green-400">billing information</a> for API usage.
