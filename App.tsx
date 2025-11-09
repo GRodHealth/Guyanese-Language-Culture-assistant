@@ -94,6 +94,7 @@ interface VocabularyItem {
   wordLanguage: string; // Language of the word
   translation: string; // The translation
   translationLanguage: string; // Language of the translation
+  phoneticTranscription: string | null; // Phonetic transcription (e.g., IPA)
   audioBase64: string | null; // Base64 audio for the word
   timestamp: number;
 }
@@ -131,6 +132,7 @@ function App() {
   const [currentVocabularyTranslationLanguage, setCurrentVocabularyTranslationLanguage] = useState<string>('English');
   const [generatingVocabAudio, setGeneratingVocabAudio] = useState<boolean>(false);
   const [playingVocabAudioId, setPlayingVocabAudioId] = useState<string | null>(null);
+  const [generatingTranscriptionId, setGeneratingTranscriptionId] = useState<string | null>(null);
 
 
   const audioContextRef = useRef<AudioContext | null>(null); // For input audio
@@ -232,6 +234,7 @@ function App() {
     setIsLoadingText(false);
     setLiveApiConnecting(false);
     setGeneratingVocabAudio(false);
+    setGeneratingTranscriptionId(null);
 
     // Handle user-initiated abort
     if (error instanceof DOMException && error.name === 'AbortError') {
@@ -756,7 +759,16 @@ function App() {
     // Load vocabulary from local storage on mount
     const storedVocab = localStorage.getItem('guyaneseVocabList');
     if (storedVocab) {
-      setVocabularyList(JSON.parse(storedVocab));
+      try {
+        const parsedVocab = JSON.parse(storedVocab);
+        if (Array.isArray(parsedVocab)) {
+          // Sort by timestamp descending so newest items are first
+          setVocabularyList(parsedVocab.sort((a, b) => b.timestamp - a.timestamp));
+        }
+      } catch (e) {
+        console.error("Failed to parse vocabulary list from local storage:", e);
+        setVocabularyList([]); // Reset to empty list on parse error
+      }
     }
 
     // Cleanup on unmount
@@ -773,6 +785,33 @@ function App() {
   useEffect(() => {
     localStorage.setItem('guyaneseVocabList', JSON.stringify(vocabularyList));
   }, [vocabularyList]);
+
+  const handleGeneratePhoneticTranscription = useCallback(async (word: string, language: string): Promise<string | null> => {
+    if (!word.trim()) {
+      return null;
+    }
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      // A precise prompt is key for getting just the IPA string.
+      const prompt = `Provide the International Phonetic Alphabet (IPA) transcription for the following word/phrase in the ${language} language: "${word}". If the language is not well-documented or the word is ambiguous, provide the most likely transcription based on linguistic patterns of the region. Respond with ONLY the IPA string, enclosed in slashes (e.g., /həˈloʊ/). Do not include any other text, labels, or explanations.`;
+      
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+      });
+
+      const transcription = response.text.trim();
+      // Simple validation: The model is instructed to return a string like /.../
+      if (transcription && transcription.startsWith('/') && transcription.endsWith('/')) {
+        return transcription;
+      }
+      // If the model fails to follow instructions exactly, return the text anyway if it's not empty.
+      return transcription || null;
+    } catch (error) {
+      handleApiError(error, `phonetic transcription for '${word}'`);
+      return null;
+    }
+  }, [handleApiError]);
 
   // Handlers for Vocabulary Builder
   const handleOpenAddVocabularyModal = useCallback((source: 'text' | 'live') => {
@@ -803,7 +842,7 @@ function App() {
     setTextError(null); // Clear any related error
   }, []);
 
-  const handleGenerateVocabAudioForModal = useCallback(async () => {
+  const handleGenerateVocabAudioForModal = useCallback(async (): Promise<string | null> => {
     if (!currentVocabularyWord.trim()) {
       setTextError("Please enter a word or phrase to generate audio.");
       return null;
@@ -844,11 +883,16 @@ function App() {
       return;
     }
 
-    setTextError("Generating audio and saving..."); // Provide feedback
-    const finalAudioBase64 = await handleGenerateVocabAudioForModal(); // This will also handle errors
+    setGeneratingVocabAudio(true);
+    setTextError("Generating audio and pronunciation..."); // Provide feedback
+
+    const [finalAudioBase64, phoneticTranscription] = await Promise.all([
+        handleGenerateVocabAudioForModal(),
+        handleGeneratePhoneticTranscription(currentVocabularyWord.trim(), currentVocabularyWordLanguage)
+    ]);
 
     if (!finalAudioBase64) {
-      // Error already handled by handleGenerateVocabAudioForModal
+      setTextError("Failed to generate audio. Please try again.");
       return; // Stop if audio generation fails
     }
 
@@ -858,12 +902,13 @@ function App() {
       wordLanguage: currentVocabularyWordLanguage,
       translation: currentVocabularyTranslation.trim(),
       translationLanguage: currentVocabularyTranslationLanguage,
+      phoneticTranscription: phoneticTranscription,
       audioBase64: finalAudioBase64,
       timestamp: Date.now(),
     };
-    setVocabularyList(prevList => [...prevList, newItem]);
+    setVocabularyList(prevList => [newItem, ...prevList]);
     handleCloseAddVocabularyModal(); // Close modal after adding
-  }, [currentVocabularyWord, currentVocabularyTranslation, currentVocabularyWordLanguage, currentVocabularyTranslationLanguage, handleCloseAddVocabularyModal, handleGenerateVocabAudioForModal]);
+  }, [currentVocabularyWord, currentVocabularyTranslation, currentVocabularyWordLanguage, currentVocabularyTranslationLanguage, handleCloseAddVocabularyModal, handleGenerateVocabAudioForModal, handleGeneratePhoneticTranscription]);
 
   const handlePlayVocabularyAudio = useCallback(async (item: VocabularyItem) => {
     if (playingVocabAudioId === item.id) {
@@ -905,6 +950,26 @@ function App() {
     }
   }, [playingVocabAudioId, playGeneratedAudio, selectedLiveVoice, handleApiError, stopAllAudioPlayback]);
 
+  const handleGenerateTranscriptionForItem = useCallback(async (item: VocabularyItem) => {
+    if (!item) return;
+
+    setGeneratingTranscriptionId(item.id);
+    setTextError(null);
+    try {
+        const transcription = await handleGeneratePhoneticTranscription(item.word, item.wordLanguage);
+        if (transcription) {
+            setVocabularyList(prevList =>
+                prevList.map(vItem =>
+                    vItem.id === item.id ? { ...vItem, phoneticTranscription: transcription } : vItem
+                )
+            );
+        } else {
+            setTextError(`Could not generate pronunciation for "${item.word}".`);
+        }
+    } finally {
+        setGeneratingTranscriptionId(null);
+    }
+  }, [handleGeneratePhoneticTranscription]);
 
   const handleDeleteVocabularyItem = useCallback((id: string) => {
     if (window.confirm("Are you sure you want to delete this vocabulary item?")) {
@@ -923,7 +988,7 @@ function App() {
   const isAnyPreviewPlaying = playingPreviewVoice !== null;
   const isVoiceControlsDisabled = isLiveApiConnected || liveApiConnecting || isAnyPreviewPlaying || generatingVocabAudio;
   const isTextControlsDisabled = isLoadingText;
-  const isVocabularyActionDisabled = generatingVocabAudio || isLoadingText || liveApiConnecting || isLiveApiConnected;
+  const isVocabularyActionDisabled = generatingVocabAudio || isLoadingText || liveApiConnecting || isLiveApiConnected || !!generatingTranscriptionId;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-green-100 via-yellow-100 to-red-100 dark:from-green-900/80 dark:via-gray-900 dark:to-red-900/80 text-gray-900 dark:text-gray-100 p-4 sm:p-6 lg:p-8">
@@ -1184,18 +1249,34 @@ function App() {
               {vocabularyList.map((item) => (
                 <div key={item.id} className="bg-gray-100 dark:bg-gray-700 p-4 rounded-lg shadow-sm border border-gray-200 dark:border-gray-600 flex flex-col justify-between">
                   <div>
-                    <p className="text-xl font-bold text-green-800 dark:text-green-300">{item.word} <span className="text-sm text-gray-500">({item.wordLanguage})</span></p>
+                    <div className="flex items-baseline gap-2 flex-wrap mb-1">
+                      <p className="text-xl font-bold text-green-800 dark:text-green-300">{item.word}</p>
+                      {item.phoneticTranscription && (
+                        <p className="text-lg text-gray-600 dark:text-gray-400 font-mono italic">{item.phoneticTranscription}</p>
+                      )}
+                    </div>
+                    <p className="text-sm text-gray-500">({item.wordLanguage})</p>
                     <p className="text-gray-700 dark:text-gray-300 mt-1">{item.translation} <span className="text-sm text-gray-500">({item.translationLanguage})</span></p>
                   </div>
-                  <div className="flex justify-end gap-2 mt-3">
+                  <div className="flex justify-end gap-2 mt-3 items-center">
+                    {!item.phoneticTranscription && (
+                      <button
+                        onClick={() => handleGenerateTranscriptionForItem(item)}
+                        className="px-3 py-1 text-sm bg-yellow-500 text-white font-semibold rounded-md hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled={isVocabularyActionDisabled || generatingTranscriptionId === item.id}
+                        aria-label={`Get pronunciation for ${item.word}`}
+                      >
+                        {generatingTranscriptionId === item.id ? '...' : 'IPA'}
+                      </button>
+                    )}
                     <button
                       onClick={() => handlePlayVocabularyAudio(item)}
                       className={`px-3 py-1 bg-blue-500 text-white font-semibold rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed
                         ${playingVocabAudioId === item.id ? 'animate-pulse' : ''}`}
-                      disabled={generatingVocabAudio || playingVocabAudioId === item.id}
+                      disabled={isVocabularyActionDisabled || playingVocabAudioId === item.id}
                       aria-label={`Play audio for ${item.word}`}
                     >
-                      {playingVocabAudioId === item.id ? 'Playing...' : (item.audioBase64 ? 'Play Audio' : 'Generate & Play')}
+                      {playingVocabAudioId === item.id ? 'Playing...' : (item.audioBase64 ? 'Play' : 'Gen & Play')}
                     </button>
                     <button
                       onClick={() => handleDeleteVocabularyItem(item.id)}
@@ -1301,7 +1382,7 @@ function App() {
                 className="px-4 py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
                 disabled={!currentVocabularyWord.trim() || !currentVocabularyTranslation.trim() || generatingVocabAudio}
               >
-                {generatingVocabAudio ? 'Generating Audio...' : 'Save to List'}
+                {generatingVocabAudio ? 'Saving...' : 'Save to List'}
               </button>
             </div>
           </div>
