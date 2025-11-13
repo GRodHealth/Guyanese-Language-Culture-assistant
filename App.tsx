@@ -1,3 +1,5 @@
+
+
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { decode, encode, decodeAudioData, createBlob } from './utils/audioHelpers';
@@ -109,6 +111,7 @@ function App() {
 
   const [selectedTextInputLanguage, setSelectedTextInputLanguage] = useState<string>('English');
   const [selectedTextOutputLanguage, setSelectedTextOutputLanguage] = useState<string>('English');
+  const [selectedTextVoice, setSelectedTextVoice] = useState<string>(AVAILABLE_VOICES[0]); // State for text query TTS voice
 
   const [isLiveApiSupported, setIsLiveApiSupported] = useState<boolean>(false);
   const [isLiveApiConnected, setIsLiveApiConnected] = useState<boolean>(false);
@@ -119,6 +122,8 @@ function App() {
   const [selectedLiveVoice, setSelectedLiveVoice] = useState<string>(AVAILABLE_VOICES[0]); // State for selected voice
   const [playingPreviewVoice, setPlayingPreviewVoice] = useState<string | null>(null); // State for voice preview
   const [isAssistantSpeaking, setIsAssistantSpeaking] = useState<boolean>(false); // New state for speaking indicator
+  const [volume, setVolume] = useState<number>(1); // Volume from 0 to 1
+  const [isMuted, setIsMuted] = useState<boolean>(false);
 
   const [selectedLiveInputLanguage, setSelectedLiveInputLanguage] = useState<string>('English');
   const [selectedLiveOutputLanguage, setSelectedLiveOutputLanguage] = useState<string>('English');
@@ -137,6 +142,7 @@ function App() {
 
   const audioContextRef = useRef<AudioContext | null>(null); // For input audio
   const outputAudioContextRef = useRef<AudioContext | null>(null); // For output audio (TTS and Live API)
+  const gainNodeRef = useRef<GainNode | null>(null); // For volume control
   const nextStartTimeRef = useRef<number>(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set()); // Shared for Live API and TTS output
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -153,8 +159,12 @@ function App() {
   // Initialize AudioContexts only when needed or on first user interaction
   const getOutputAudioContext = useCallback(() => {
     if (!outputAudioContextRef.current) {
-      outputAudioContextRef.current = new AudioContext({ sampleRate: 24000 });
-      outputAudioContextRef.current.resume(); // Ensure it's not suspended
+      const context = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      const gainNode = context.createGain();
+      gainNode.connect(context.destination);
+      gainNodeRef.current = gainNode;
+      outputAudioContextRef.current = context;
+      context.resume(); // Ensure it's not suspended
     }
     return outputAudioContextRef.current;
   }, []);
@@ -192,7 +202,13 @@ function App() {
 
       const source = outputAudioContext.createBufferSource();
       source.buffer = audioBuffer;
-      source.connect(outputAudioContext.destination); // Connect directly to destination
+
+      if (gainNodeRef.current) {
+        source.connect(gainNodeRef.current);
+      } else {
+        // Fallback in case gain node isn't ready, though it should be.
+        source.connect(outputAudioContext.destination);
+      }
 
       source.addEventListener('ended', () => {
         sourcesRef.current.delete(source);
@@ -427,7 +443,7 @@ function App() {
       }
 
       // Automatically speak the response
-      await handleTextToSpeech(responseText, selectedLiveVoice); // Use selectedLiveVoice for TTS
+      await handleTextToSpeech(responseText, selectedTextVoice); // Use selectedTextVoice for TTS
 
     } catch (error) {
       handleApiError(error, 'text generation');
@@ -437,7 +453,7 @@ function App() {
       }
       setIsLoadingText(false);
     }
-  }, [textPrompt, handleApiError, handleTextToSpeech, stopAllAudioPlayback, selectedTextInputLanguage, selectedTextOutputLanguage, selectedLiveVoice]);
+  }, [textPrompt, handleApiError, handleTextToSpeech, stopAllAudioPlayback, selectedTextInputLanguage, selectedTextOutputLanguage, selectedTextVoice]);
 
 
   const stopAudioVisualization = useCallback(() => {
@@ -679,7 +695,14 @@ function App() {
                 );
                 const source = outputAudioContext.createBufferSource();
                 source.buffer = audioBuffer;
-                source.connect(outputCtx.destination);
+                
+                if (gainNodeRef.current) {
+                  source.connect(gainNodeRef.current);
+                } else {
+                  // Fallback
+                  source.connect(outputCtx.destination);
+                }
+
                 source.addEventListener('ended', () => {
                   sourcesRef.current.delete(source);
                   if (sourcesRef.current.size === 0 && !message.serverContent?.interrupted) {
@@ -780,6 +803,15 @@ function App() {
       }
     };
   }, [stopLiveConversation]);
+
+  // Effect to control audio volume
+  useEffect(() => {
+    if (gainNodeRef.current && outputAudioContextRef.current) {
+      const newGain = isMuted ? 0 : volume;
+      // Use setTargetAtTime for a smoother transition to the new volume
+      gainNodeRef.current.gain.setTargetAtTime(newGain, outputAudioContextRef.current.currentTime, 0.01);
+    }
+  }, [volume, isMuted]);
 
   // Save vocabulary to local storage whenever it changes
   useEffect(() => {
@@ -991,7 +1023,7 @@ function App() {
   const isVocabularyActionDisabled = generatingVocabAudio || isLoadingText || liveApiConnecting || isLiveApiConnected || !!generatingTranscriptionId;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-green-100 via-yellow-100 to-red-100 dark:from-green-900/80 dark:via-gray-900 dark:to-red-900/80 text-gray-900 dark:text-gray-100 p-4 sm:p-6 lg:p-8">
+    <div className="min-h-screen bg-gradient-to-br from-green-100 via-yellow-100 to-red-100 dark:from-green-900/80 dark:via-gray-900 dark:to-red-900/80 text-gray-900 dark:text-gray-100 p-4 sm:p-6 lg:p-8 pb-32 sm:pb-28">
       <h1 className="flex items-center justify-center text-4xl sm:text-5xl font-extrabold text-center mb-10 text-transparent bg-clip-text bg-gradient-to-r from-yellow-600 to-green-700 dark:from-yellow-400 dark:to-green-400">
         {/* Stylized Star Icon - inspired by the Golden Arrowhead */}
         <svg className="w-8 h-8 mr-3 text-yellow-500 dark:text-yellow-300" fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -1003,8 +1035,8 @@ function App() {
       {/* Text-based Query Section */}
       <section className="bg-white dark:bg-gray-800 shadow-xl rounded-2xl p-6 sm:p-8 mb-12 border border-gray-200 dark:border-gray-700">
         <h2 className="text-3xl font-bold mb-6 text-gray-800 dark:text-gray-100">Text & Information Queries</h2>
-        <div className="flex flex-col sm:flex-row gap-4 mb-6">
-          <div className="flex-1 flex flex-col gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+          <div className="flex flex-col gap-2">
             <label htmlFor="text-input-lang-select" className="text-gray-700 dark:text-gray-300 font-medium">Your Language:</label>
             <select
               id="text-input-lang-select"
@@ -1019,7 +1051,7 @@ function App() {
               ))}
             </select>
           </div>
-          <div className="flex-1 flex flex-col gap-2">
+          <div className="flex flex-col gap-2">
             <label htmlFor="text-output-lang-select" className="text-gray-700 dark:text-gray-300 font-medium">Assistant's Language:</label>
             <select
               id="text-output-lang-select"
@@ -1031,6 +1063,21 @@ function App() {
             >
               {GUYANESE_LANGUAGES.map(lang => (
                 <option key={`text-output-${lang}`} value={lang}>{lang}</option>
+              ))}
+            </select>
+          </div>
+           <div className="flex flex-col gap-2">
+            <label htmlFor="text-voice-select" className="text-gray-700 dark:text-gray-300 font-medium">Assistant's Voice:</label>
+            <select
+              id="text-voice-select"
+              value={selectedTextVoice}
+              onChange={(e) => setSelectedTextVoice(e.target.value)}
+              className="p-3 border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-colors duration-200"
+              disabled={isTextControlsDisabled}
+              aria-label="Select assistant's voice for text-to-speech"
+            >
+              {AVAILABLE_VOICES.map(voice => (
+                <option key={`text-voice-${voice}`} value={voice}>{voice}</option>
               ))}
             </select>
           </div>
@@ -1104,7 +1151,7 @@ function App() {
         )}
 
         <div className="flex flex-col gap-4 mb-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg border border-gray-200 dark:border-gray-600">
             <div className="flex flex-col gap-2">
               <label htmlFor="live-input-lang-select" className="text-gray-700 dark:text-gray-300 font-medium">Your Language:</label>
               <select
@@ -1303,6 +1350,85 @@ function App() {
             )}
           </>
         )}
+      </section>
+
+      {/* Floating Audio Controls */}
+      <section className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 w-11/12 max-w-2xl bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm shadow-2xl rounded-2xl p-4 sm:p-5 border border-gray-200 dark:border-gray-700">
+        <h2 className="sr-only">Audio Controls</h2>
+        <div className="flex flex-col sm:flex-row items-center gap-4">
+          {/* Stop Button */}
+          <button
+            onClick={stopAllAudioPlayback}
+            className="px-5 py-3 bg-red-600 text-white font-semibold rounded-lg shadow-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-75 transition-all duration-200 flex items-center gap-2"
+            aria-label="Stop all audio playback"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z" clipRule="evenodd" />
+            </svg>
+            <span className="hidden sm:inline">Stop Audio</span>
+          </button>
+
+          {/* Replay TTS Button */}
+          <button
+            onClick={() => handleTextToSpeech(textResponse, selectedTextVoice)}
+            className="px-5 py-3 bg-blue-600 text-white font-semibold rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-75 transition-all duration-200 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={!textResponse.trim() || isLoadingText || isLiveApiConnected || liveApiConnecting || isAssistantSpeaking}
+            aria-label="Replay last response audio"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM14.657 2.929a1 1 0 011.414 0A9 9 0 0119 10a9 9 0 01-2.929 7.071 1 1 0 01-1.414-1.414A7 7 0 0017 10a7 7 0 00-2.343-5.657 1 1 0 010-1.414zm-2.829 2.828a1 1 0 011.415 0A5 5 0 0115 10a5 5 0 01-1.757 3.536 1 1 0 01-1.415-1.415A3 3 0 0013 10a3 3 0 00-1.172-2.475 1 1 0 010-1.414z" clipRule="evenodd" />
+            </svg>
+            <span className="hidden sm:inline">Replay</span>
+          </button>
+
+          {/* Mute Button */}
+          <button
+            onClick={() => setIsMuted(!isMuted)}
+            className={`p-3 rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800 focus:ring-blue-500 transition-colors ${
+              isMuted || volume === 0
+                ? 'bg-red-100 dark:bg-red-800/50 text-red-600 dark:text-red-300'
+                : 'bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-gray-200 hover:bg-gray-300 dark:hover:bg-gray-500'
+            }`}
+            aria-label={isMuted ? "Unmute" : "Mute"}
+          >
+            {isMuted || volume === 0 ? (
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M17 14l-2-2m0 0l-2-2m2 2l2-2m-2 2l2 2" />
+              </svg>
+            ) : volume < 0.5 ? (
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15.536 8.464a5 5 0 010 7.072" />
+              </svg>
+            ) : (
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15.536 8.464a5 5 0 010 7.072M17 4.414A9 9 0 0117 19.586M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+              </svg>
+            )}
+          </button>
+
+          {/* Volume Slider */}
+          <div className="flex items-center gap-2 flex-grow w-full sm:w-auto">
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={isMuted ? 0 : volume}
+              onChange={(e) => {
+                  const newVolume = parseFloat(e.target.value);
+                  setVolume(newVolume);
+                  if (newVolume > 0 && isMuted) {
+                      setIsMuted(false);
+                  }
+              }}
+              className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer dark:bg-gray-700"
+              aria-label="Volume control"
+            />
+            <span className="w-12 text-center text-gray-700 dark:text-gray-300">{Math.round((isMuted ? 0 : volume) * 100)}%</span>
+          </div>
+        </div>
       </section>
 
       {/* Add Vocabulary Modal */}
